@@ -174,6 +174,9 @@ The agent knew all of that from the chain. You were working again in 30 seconds.
 
 Raven is actively being built. Here's what's on the roadmap:
 
+**SQLite-Vec**
+Using embeddings with SQL tables to avoid using a separate database in the future. This keeps the project lean, and footprint minimal. Once we introduce semantic search, the impact is significat. If every node has an embedding, the chain stops being just a log and becomes a searchable knowledge base about everything you've ever worked on. The longer you use Raven, the smarter it gets at finding relevant context.
+
 **Speculative planning**
 The agent will be able to project future events onto the chain — "I think we'll need to book CNC time, then run the assembly, then do final testing." These show up as *speculative* nodes. As reality unfolds, they get confirmed or pruned. The agent maintains a live hypothesis about what comes next, not just a record of what happened.
 
