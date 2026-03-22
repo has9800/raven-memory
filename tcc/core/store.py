@@ -2,6 +2,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import warnings
 from typing import Callable, Optional
 
 from .node import TCCNode
@@ -22,7 +23,26 @@ class TCCStore:
         self._lock = threading.Lock()
         self._on_status_update = on_status_update
         self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._vec_enabled = self._load_sqlite_vec(self._conn)
         self._init_schema()
+
+    def _load_sqlite_vec(self, conn: sqlite3.Connection) -> bool:
+        """Load sqlite-vec extension if available."""
+        if self.path == ":memory:":
+            return False
+        try:
+            import sqlite_vec
+
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+            return True
+        except Exception as exc:
+            warnings.warn(
+                f"sqlite-vec not available — semantic search disabled: {exc}",
+                UserWarning,
+            )
+            return False
 
     def _init_schema(self):
         with self._lock:
@@ -51,6 +71,14 @@ class TCCStore:
                 CREATE INDEX IF NOT EXISTS idx_status    ON nodes(status);
                 CREATE INDEX IF NOT EXISTS idx_timestamp ON nodes(timestamp);
             """)
+            if self._vec_enabled:
+                cur.executescript("""
+                    CREATE VIRTUAL TABLE IF NOT EXISTS node_embeddings
+                    USING vec0(
+                        hash        TEXT PRIMARY KEY,
+                        embedding   FLOAT[384]
+                    );
+                """)
             self._conn.commit()
 
     def save(self, node: TCCNode) -> None:
@@ -73,6 +101,17 @@ class TCCStore:
                         json.dumps(node.metadata),
                     ),
                 )
+                if self._vec_enabled and self.path != ":memory:":
+                    try:
+                        from .embedder import embed_node
+
+                        vec = embed_node(node)
+                        self._conn.execute(
+                            "INSERT OR REPLACE INTO node_embeddings(hash, embedding) VALUES (?, ?)",
+                            (node.hash, json.dumps(vec)),
+                        )
+                    except Exception as exc:
+                        warnings.warn(f"Failed to embed node {node.hash}: {exc}", UserWarning)
                 self._conn.commit()
             except sqlite3.IntegrityError:
                 raise DuplicateNodeError(f"Node {node.hash} already exists")
@@ -158,6 +197,64 @@ class TCCStore:
 
     def mark_branch_merged(self, branch_id: str) -> None:
         self.set_meta(f"branch_{branch_id}_merged", "true")
+
+    def search(
+        self,
+        query: str,
+        n: int = 5,
+        session_id: str | None = None,
+    ) -> list[TCCNode]:
+        """
+        Semantic search over node embeddings.
+        Returns up to n nodes most similar to the query string.
+        Falls back to empty list if sqlite-vec not available.
+
+        Args:
+            query: Natural language search query
+            n: Number of results to return
+            session_id: Optional filter to search within a specific session
+        """
+        if not self._vec_enabled:
+            return []
+
+        try:
+            from .embedder import embed
+
+            vec = embed(query)
+            vec_json = json.dumps(vec)
+
+            with self._lock:
+                if session_id:
+                    rows = self._conn.execute(
+                        """
+                        SELECT n.hash
+                        FROM node_embeddings e
+                        JOIN nodes n ON e.hash = n.hash
+                        WHERE n.session_id = ?
+                        ORDER BY vec_distance_cosine(e.embedding, ?) ASC
+                        LIMIT ?
+                        """,
+                        (session_id, vec_json, n),
+                    ).fetchall()
+                else:
+                    rows = self._conn.execute(
+                        """
+                        SELECT hash
+                        FROM node_embeddings
+                        ORDER BY vec_distance_cosine(embedding, ?) ASC
+                        LIMIT ?
+                        """,
+                        (vec_json, n),
+                    ).fetchall()
+
+            return [self.load(row[0]) for row in rows]
+        except Exception as exc:
+            warnings.warn(f"Search failed: {exc}", UserWarning)
+            return []
+
+    @property
+    def is_vec_enabled(self) -> bool:
+        return self._vec_enabled
 
     def _row_to_node(self, row) -> TCCNode:
         return TCCNode(
