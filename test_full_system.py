@@ -112,7 +112,8 @@ class HFChatAdapter:
         )
         inputs = self.tokenizer(prompt, return_tensors="pt")
         inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
-        outputs = self.model.generate(**inputs, max_new_tokens=256)
+        outputs = self.model.generate(**inputs, max_new_tokens=256,
+                               pad_token_id=self.tokenizer.eos_token_id)
         generated = self.tokenizer.decode(outputs[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True)
         return self._react_fallback(generated)
 
