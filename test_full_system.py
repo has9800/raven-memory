@@ -230,8 +230,7 @@ def main():
     interrupted = False
     for chunk in graph2.stream(initial_state2, thread_config2):
         if "__interrupt__" in chunk:
-            current_state = graph2.get_state(thread_config2)
-            print(f"Interrupted at node: {current_state.next}")
+            print(f"Interrupted: {chunk['__interrupt__']}")
             interrupted = True
             break
 
@@ -272,9 +271,7 @@ def main():
 
     print("\n=== Test 6: LangGraph thread persistence ===")
 
-    checkpointer_conn2 = sqlite3.connect(DB_PATH, check_same_thread=False)
-    checkpointer_conn2.execute("PRAGMA journal_mode=WAL")
-    checkpointer2 = SqliteSaver(checkpointer_conn2)
+    checkpointer2 = SqliteSaver.from_conn_string(DB_PATH)
     thread_config_reload = {"configurable": {"thread_id": f"session_{session_id}"}}
 
     state_history = list(graph.get_state_history(thread_config_reload))
