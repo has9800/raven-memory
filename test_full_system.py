@@ -23,7 +23,7 @@ from tcc.integration.interceptor import TCCInterceptor
 from tcc.integration.tools import TOOL_MAP, TOOLS
 
 DB_PATH = "tcc_test.db"
-MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
+MODEL_NAME = "Qwen/Qwen3.5-4B"
 TOOL_PATTERN = re.compile(r"TOOL:\s*(?P<n>[a-zA-Z_][a-zA-Z0-9_]*)\s*ARGS:\s*(?P<args>\{.*\})", re.S)
 
 
