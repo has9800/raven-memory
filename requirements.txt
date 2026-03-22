@@ -6,3 +6,6 @@ langchain-core>=0.3.0
 accelerate
 sqlite-vec
 sentence-transformers
+
+datasets
+openai
