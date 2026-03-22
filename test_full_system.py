@@ -23,7 +23,7 @@ from tcc.integration.tools import TOOLS
 
 DB_PATH = "tcc_test.db"
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
-TOOL_PATTERN = re.compile(r"TOOL:\s*(?P<name>[a-zA-Z_][a-zA-Z0-9_]*)\s*ARGS:\s*(?P<args>\{.*\})", re.S)
+TOOL_PATTERN = re.compile(r"TOOL:\s*(?P<n>[a-zA-Z_][a-zA-Z0-9_]*)\s*ARGS:\s*(?P<args>\{.*\})", re.S)
 
 
 class HFChatAdapter:
@@ -86,7 +86,7 @@ class HFChatAdapter:
         if not match:
             return AIMessage(content=text.strip())
 
-        tool_name = match.group("name")
+        tool_name = match.group("n")
         try:
             args = json.loads(match.group("args"))
         except json.JSONDecodeError:
@@ -110,6 +110,7 @@ class HFChatAdapter:
             add_generation_prompt=True,
         )
         inputs = self.tokenizer(prompt, return_tensors="pt")
+        inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
         outputs = self.model.generate(**inputs, max_new_tokens=256)
         generated = self.tokenizer.decode(outputs[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True)
         return self._react_fallback(generated)
@@ -132,7 +133,7 @@ def build_model_with_tools():
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
         model = AutoModelForCausalLM.from_pretrained(
             MODEL_NAME,
-            torch_dtype=torch.bfloat16,
+            dtype=torch.bfloat16,
             device_map="auto" if device != "cpu" else None,
         )
         return HFChatAdapter(model=model, tokenizer=tokenizer).bind_tools(TOOLS)
