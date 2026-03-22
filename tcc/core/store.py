@@ -101,20 +101,77 @@ class TCCStore:
                         json.dumps(node.metadata),
                     ),
                 )
-                if self._vec_enabled and self.path != ":memory:":
-                    try:
-                        from .embedder import embed_node
-
-                        vec = embed_node(node)
-                        self._conn.execute(
-                            "INSERT OR REPLACE INTO node_embeddings(hash, embedding) VALUES (?, ?)",
-                            (node.hash, json.dumps(vec)),
-                        )
-                    except Exception as exc:
-                        warnings.warn(f"Failed to embed node {node.hash}: {exc}", UserWarning)
                 self._conn.commit()
             except sqlite3.IntegrityError:
                 raise DuplicateNodeError(f"Node {node.hash} already exists")
+
+    def embed_all(
+        self,
+        show_progress: bool = False,
+        batch_size: int = 32,
+    ) -> int:
+        """
+        Batch embed all nodes that don't yet have embeddings.
+        Uses batched encoding for 10-20x speedup over one-at-a-time.
+        Call once after bulk ingestion rather than embedding on every save().
+
+        Args:
+            show_progress: show tqdm progress bar during encoding
+            batch_size: number of texts to encode per forward pass (default 32)
+
+        Returns:
+            number of nodes embedded
+        """
+        if not self._vec_enabled:
+            return 0
+
+        try:
+            from .embedder import get_embedder
+
+            with self._lock:
+                all_hashes = {
+                    r[0] for r in self._conn.execute(
+                        "SELECT hash FROM nodes"
+                    ).fetchall()
+                }
+                embedded_hashes = {
+                    r[0] for r in self._conn.execute(
+                        "SELECT hash FROM node_embeddings"
+                    ).fetchall()
+                }
+
+            to_embed = list(all_hashes - embedded_hashes)
+            if not to_embed:
+                return 0
+
+            nodes = [self.load(h) for h in to_embed]
+            texts = [
+                f"{n.event}. {n.plan}".strip(". ")
+                for n in nodes
+            ]
+
+            model = get_embedder()
+            all_vecs = model.encode(
+                texts,
+                batch_size=batch_size,
+                normalize_embeddings=True,
+                show_progress_bar=show_progress,
+            )
+
+            with self._lock:
+                for node, vec in zip(nodes, all_vecs):
+                    self._conn.execute(
+                        "INSERT OR REPLACE INTO node_embeddings"
+                        "(hash, embedding) VALUES (?, ?)",
+                        (node.hash, json.dumps(vec.tolist())),
+                    )
+                self._conn.commit()
+
+            return len(nodes)
+
+        except Exception as exc:
+            warnings.warn(f"embed_all failed: {exc}", UserWarning)
+            return 0
 
     def load(self, hash: str) -> TCCNode:
         with self._lock:
