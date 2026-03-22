@@ -82,6 +82,15 @@ def ingest_example(
         if not crash:
             reconciler.end_session(dag, session_id)
 
+    # Batch embed all nodes after ingestion (batched = fast)
+    if store.is_vec_enabled:
+        n_embedded = store.embed_all(
+            show_progress=True,
+            batch_size=32,
+        )
+        if n_embedded > 0:
+            print(f"    embedded {n_embedded} nodes (batch_size=32)")
+
     return dag, reconciler, store
 
 

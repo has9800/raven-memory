@@ -84,7 +84,7 @@ Question: {question}
 
 Answer in 1-3 sentences. Be specific and factual."""
 
-    answer = inference_fn(prompt)
+    answer = inference_fn(prompt) or ""
     latency_ms = (time.time() - start) * 1000
 
     return answer, latency_ms, 0
@@ -117,7 +117,10 @@ INCORRECT
 
 Do not explain. Just CORRECT or INCORRECT."""
 
-    judgment = judge_fn(prompt).strip().upper()
+    raw = judge_fn(prompt)
+    if not raw:
+        return 0.0
+    judgment = raw.strip().upper()
     if "CORRECT" in judgment and "INCORRECT" not in judgment:
         return 1.0
     return 0.0
@@ -216,6 +219,13 @@ def run_evaluation(
                         latency_ms=0.0,
                     )
                 )
+
+            # Print running score every 10 questions
+            if verbose and len(result.results) % 10 == 0 and result.results:
+                n = len(result.results)
+                correct = sum(r.score for r in result.results)
+                print(f"    [{n} questions] running score: "
+                      f"{correct/n:.1%}")
 
         try:
             import os
