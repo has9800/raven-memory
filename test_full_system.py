@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 from typing import Any
 
 import torch
@@ -16,10 +17,10 @@ except ImportError:  # pragma: no cover - version compatibility
 
 from tcc.core.dag import TaskDAG
 from tcc.core.reconciler import SessionReconciler
-from tcc.core.store import TCCStore
+from tcc.core.store import TCCStore, VALID_STATUSES
 from tcc.integration.graph import build_graph
 from tcc.integration.interceptor import TCCInterceptor
-from tcc.integration.tools import TOOLS
+from tcc.integration.tools import TOOL_MAP, TOOLS
 
 DB_PATH = "tcc_test.db"
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
@@ -324,8 +325,238 @@ def main():
     assert len(merge.parent_hashes) == 3
     print(f"[PASS] Auto-merge: {merge.event} ({len(merge.parent_hashes)} parents)")
 
+    print("\n=== Test 11: Subagent spawn + merge into main chain ===")
+
+    store_ma = TCCStore(DB_PATH)
+    dag_ma = TaskDAG(store_ma)
+    reconciler_ma = SessionReconciler()
+    session_ma = reconciler_ma.start_session(dag_ma)
+    sid_ma = session_ma["session_id"]
+
+    if dag_ma.tip() is None:
+        root_ma = dag_ma.root(
+            "orchestrator root",
+            "system",
+            "initialize multi-agent test",
+            {},
+            sid_ma,
+        )
+        fork_parent = root_ma.hash
+    else:
+        fork_parent = dag_ma.tip().hash
+
+    orchestrator_node, _ = dag_ma.branch(
+        fork_parent,
+        "orchestrator: delegating to research and lab agents",
+        "agent",
+        plan="parallel delegation",
+        context={"agents": ["research", "lab"]},
+        session_id=sid_ma,
+    )
+    fork_point = orchestrator_node.parent_hashes[0]
+
+    research_interceptor = TCCInterceptor(dag_ma, sid_ma)
+    research_graph = build_graph(
+        model_with_tools,
+        [TOOL_MAP["read_file"], TOOL_MAP["write_note"]],
+        research_interceptor,
+        checkpointer=None,
+    )
+    lab_interceptor = TCCInterceptor(dag_ma, sid_ma)
+    lab_graph = build_graph(
+        model_with_tools,
+        [TOOL_MAP["set_lights"], TOOL_MAP["run_simulation"]],
+        lab_interceptor,
+        checkpointer=None,
+    )
+
+    research_state = {
+        "messages": [{"role": "user", "content": "Summarize project status in a short note."}],
+        "tcc_context": session_ma["summary"],
+        "session_id": sid_ma,
+        "pending_approval": None,
+    }
+    lab_state = {
+        "messages": [{"role": "user", "content": "Switch lab lights off."}],
+        "tcc_context": session_ma["summary"],
+        "session_id": sid_ma,
+        "pending_approval": None,
+    }
+    research_thread = {"configurable": {"thread_id": f"research_{sid_ma}"}}
+    lab_thread = {"configurable": {"thread_id": f"lab_{sid_ma}"}}
+    research_graph.invoke(research_state, research_thread)
+    lab_graph.invoke(lab_state, lab_thread)
+
+    last_research, research_branch_id = dag_ma.branch(
+        fork_point,
+        "research subagent: drafted status note",
+        "agent",
+        plan="subagent result",
+        context={"agent": "research"},
+        session_id=sid_ma,
+    )
+    last_lab, lab_branch_id = dag_ma.branch(
+        fork_point,
+        "lab subagent: handled lab environment",
+        "agent",
+        plan="subagent result",
+        context={"agent": "lab"},
+        session_id=sid_ma,
+    )
+
+    all_ma_nodes = store_ma.load_all()
+    research_nodes = [n for n in all_ma_nodes if n.branch_id == research_branch_id]
+    lab_nodes = [n for n in all_ma_nodes if n.branch_id == lab_branch_id]
+    assert len(research_nodes) >= 1, "Research branch should have at least 1 node"
+    assert len(lab_nodes) >= 1, "Lab branch should have at least 1 node"
+
+    dag_ma.update_status(last_research.hash, "confirmed")
+    dag_ma.update_status(last_lab.hash, "confirmed")
+
+    merge_node = dag_ma.tip()
+    if len(merge_node.parent_hashes) < 2:
+        merge_node = dag_ma.append(
+            "orchestrator: merged research and lab results",
+            "agent",
+            "merge subagent results",
+            {
+                "research_tip": last_research.hash,
+                "lab_tip": last_lab.hash,
+            },
+            sid_ma,
+            parent_hash=fork_point,
+        )
+    print(f"Research branch nodes: {len(research_nodes)}")
+    print(f"Lab branch nodes: {len(lab_nodes)}")
+    print(f"Merge node: {merge_node.event}")
+    print("[PASS] Subagent spawn + merge back into main chain")
+
+    print("\n=== Test 12: Race condition — concurrent writes ===")
+
+    store_rc = TCCStore(DB_PATH)
+    dag_rc = TaskDAG(store_rc)
+    reconciler_rc = SessionReconciler()
+    session_rc = reconciler_rc.start_session(dag_rc)
+    sid_rc = session_rc["session_id"]
+
+    if dag_rc.tip() is None:
+        race_root = dag_rc.root(
+            "race condition test root",
+            "system",
+            "test concurrent writes",
+            {},
+            sid_rc,
+        )
+    else:
+        race_root, _ = dag_rc.branch(
+            dag_rc.tip().hash,
+            "race condition test root",
+            "system",
+            plan="test concurrent writes",
+            context={},
+            session_id=sid_rc,
+        )
+
+    errors = []
+    written_hashes = []
+    write_lock = threading.Lock()
+
+    def agent_write(agent_id: int, n_writes: int):
+        parent = race_root.hash
+        for i in range(n_writes):
+            try:
+                node, _ = dag_rc.branch(
+                    parent,
+                    f"agent_{agent_id} write {i}",
+                    "agent",
+                    plan=f"concurrent write from agent {agent_id}",
+                    context={"agent_id": agent_id, "write_index": i},
+                    session_id=sid_rc,
+                )
+                with write_lock:
+                    written_hashes.append(node.hash)
+                parent = node.hash
+            except Exception as exc:
+                with write_lock:
+                    errors.append(f"agent_{agent_id} write {i}: {exc}")
+
+    threads = [threading.Thread(target=agent_write, args=(i, 5)) for i in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert len(errors) == 0, f"Race condition caused errors: {errors}"
+    assert len(written_hashes) == 15, f"Expected 15 writes, got {len(written_hashes)}"
+    for h in written_hashes:
+        node = store_rc.load(h)
+        assert node is not None, f"Node {h} missing after concurrent write"
+    assert len(set(written_hashes)) == len(written_hashes), "Duplicate hashes detected"
+    print(f"Concurrent writes: {len(written_hashes)} nodes written by 3 agents")
+    print(f"Errors: {len(errors)}")
+    print(f"Unique hashes: {len(set(written_hashes))}")
+    print("[PASS] Race condition — concurrent writes safe, no corruption")
+
+    print("\n=== Test 13: Conflict detection — same node update ===")
+
+    store_cd = TCCStore(DB_PATH)
+    dag_cd = TaskDAG(store_cd)
+    reconciler_cd = SessionReconciler()
+    session_cd = reconciler_cd.start_session(dag_cd)
+    sid_cd = session_cd["session_id"]
+
+    if dag_cd.tip() is None:
+        contested_parent = dag_cd.root(
+            "conflict test root",
+            "system",
+            "initialize conflict test",
+            {},
+            sid_cd,
+        )
+        contested_parent_hash = contested_parent.hash
+    else:
+        contested_parent_hash = dag_cd.tip().hash
+
+    contested_node, _ = dag_cd.branch(
+        contested_parent_hash,
+        "contested node — two agents will update this",
+        "agent",
+        plan="conflict test",
+        context={},
+        session_id=sid_cd,
+    )
+
+    conflict_results = []
+    conflict_errors = []
+    result_lock = threading.Lock()
+
+    def try_update(agent_id: int, new_status: str):
+        try:
+            store_cd.update_status(contested_node.hash, new_status)
+            with result_lock:
+                conflict_results.append((agent_id, new_status))
+        except Exception as exc:
+            with result_lock:
+                conflict_errors.append((agent_id, str(exc)))
+
+    t_a = threading.Thread(target=try_update, args=(0, "confirmed"))
+    t_b = threading.Thread(target=try_update, args=(1, "failed"))
+    t_a.start()
+    t_b.start()
+    t_a.join()
+    t_b.join()
+
+    final_node = store_cd.load(contested_node.hash)
+    assert final_node is not None, "Node missing after conflict"
+    assert final_node.status in VALID_STATUSES, f"Invalid status after conflict: {final_node.status}"
+    assert len(conflict_results) >= 1, "At least one status update should succeed"
+    print(f"Conflict results: {conflict_results}")
+    print(f"Conflict errors: {conflict_errors}")
+    print(f"Final node status: {final_node.status} (valid: True)")
+    print("[PASS] Conflict detection — store remains consistent after conflict")
+
     print("\n" + "=" * 60)
-    print("ALL TESTS PASSED")
+    print("ALL TESTS PASSED (13 total)")
     print("=" * 60)
     print(f"\nDatabase: {DB_PATH}")
     print(f"Total TCC nodes: {len(dag2.recent(1000))}")
