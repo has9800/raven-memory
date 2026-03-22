@@ -35,7 +35,23 @@ def _human_time(iso: str) -> str:
 
 class SessionReconciler:
 
-    def start_session(self, dag: TaskDAG) -> dict:
+    def start_session(
+        self,
+        dag: TaskDAG,
+        n_recent: int = 10,
+        search_query: str | None = None,
+        n_search: int = 5,
+    ) -> dict:
+        """
+        Start a new session and return context for agent injection.
+
+        Args:
+            dag: The TaskDAG to use
+            n_recent: Number of recent nodes to include
+            search_query: Optional semantic search query to find relevant
+                          historical nodes beyond the recent window
+            n_search: Number of semantic search results to include
+        """
         session_id = uuid.uuid4().hex[:12]
         tip = dag.tip()
         is_fresh = tip is None
@@ -43,7 +59,13 @@ class SessionReconciler:
         if is_fresh:
             summary = "No history yet. Starting fresh."
         else:
-            summary = self._build_summary(dag, tip)
+            summary = self._build_summary(
+                dag,
+                tip,
+                n_recent=n_recent,
+                search_query=search_query,
+                n_search=n_search,
+            )
 
         return {
             "session_id": session_id,
@@ -52,8 +74,15 @@ class SessionReconciler:
             "is_fresh": is_fresh,
         }
 
-    def _build_summary(self, dag: TaskDAG, tip: TCCNode) -> str:
-        recent = dag.recent(10)
+    def _build_summary(
+        self,
+        dag: TaskDAG,
+        tip: TCCNode,
+        n_recent: int = 10,
+        search_query: str | None = None,
+        n_search: int = 5,
+    ) -> str:
+        recent = dag.recent(n_recent)
         lines = []
         lines.append(f"Last active: {_human_time(tip.timestamp)}")
         lines.append("")
@@ -71,6 +100,18 @@ class SessionReconciler:
             lines.append(f"Relevant paths: {', '.join(ctx['relevant_paths'])}")
         if ctx.get("notes"):
             lines.append(f"Notes: {ctx['notes']}")
+
+        semantic_nodes = []
+        if search_query and dag._store.is_vec_enabled:
+            semantic_nodes = dag._store.search(search_query, n=n_search)
+            recent_hashes = {n.hash for n in recent}
+            semantic_nodes = [n for n in semantic_nodes if n.hash not in recent_hashes]
+
+        if semantic_nodes:
+            lines.append("")
+            lines.append("Relevant historical context:")
+            for node in semantic_nodes:
+                lines.append(f"  [{node.actor}] {node.event}")
 
         return "\n".join(lines)
 
