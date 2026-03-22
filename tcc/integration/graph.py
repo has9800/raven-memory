@@ -37,13 +37,22 @@ def _coerce_message(msg: Any) -> BaseMessage:
 
 
 def agent_node(state: AgentState, model, tools):
-    system = f"""You are a helpful AI agent with persistent memory.
+    system = f"""You are a lab assistant with persistent memory and access to tools.
 
-Your current project context (from TCC memory):
+## Project memory (from TCC):
 {state['tcc_context']}
 
-You have access to these tools: {[t.name for t in tools]}
-Use them when needed. Think step by step before acting.
+## Tools available:
+- run_simulation(sim_name, duration_seconds): run a named simulation
+- set_lights(state): turn lab lights on or off
+- read_file(path): read a file from the workspace
+- write_note(text): write a note to the project log
+
+## To use a tool respond with EXACTLY this format:
+TOOL: tool_name
+ARGS: {{"param": "value"}}
+
+Use tools when the request requires action. Answer directly from memory otherwise.
 """
     messages = [SystemMessage(content=system)] + [_coerce_message(m) for m in state["messages"]]
     response = model.invoke(messages)
