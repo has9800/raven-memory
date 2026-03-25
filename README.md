@@ -334,3 +334,112 @@ Ravens remember. So does your agent.
 ---
 
 *Drop in. Stay local. Never forget.*
+
+---
+
+## Future features
+
+### DAG superpowers
+
+**Chain diffing**
+Compare two branches that approached the same problem differently. See exactly where decisions diverged, where they reconverged, and what the outcome difference was. Like `git diff` but for reasoning.
+
+**Dead branch resurrection**
+Abandoned an approach 3 months ago? New information makes it viable again. Find the abandoned branch tip, bring it forward as a new thread alongside main. The work was never lost — just parked.
+
+**Counterfactual replay**
+Fork a speculative branch from any past decision node — "what if we had done X instead" — run it forward, compare outcomes against main, then merge or prune. The original chain is untouched. Explore alternatives without committing.
+
+**Causal blame assignment**
+Something went wrong. Walk backwards from the failure node and weight each ancestor by downstream contribution. The root cause is structurally identifiable — the node with highest weighted contribution — with no ML required.
+
+**Chain compression for cold storage**
+Compress completed sub-chains between merge nodes into single summary nodes backed by archived detail. Agent reads summaries by default, drills into archives on demand. Like git squash but for memory.
+
+**Confidence decay**
+Nodes become less reliable over time. A decision from 6 months ago may be outdated. Every node carries a confidence score that decays as subsequent nodes touch the same domain. Agent flags stale nodes before acting on them.
+
+**Cross-project node transplanting**
+Solved a problem in project A? Transplant the relevant node subtree into project B as a reference branch. sqlite-vec identifies the pattern match. Agent says "we solved this before — want to use that approach?"
+
+**Automatic milestone detection**
+Identify natural completion points structurally — nodes where multiple branches converged and status confirmed. "Show me all milestones in this project" becomes a graph query, not a text search. No manual labeling required.
+
+**Chain health metrics**
+Structural properties computed at any point — depth (decisions deep), width (parallel branches open), merge frequency, rollback rate, speculative ratio. High rollback rate + wide branches + low merge frequency = project in trouble. Agent surfaces this proactively.
+
+**Session templates from successful chains**
+Completed a project successfully? Extract the chain as a reusable template — a proven sequence of decisions that worked. Agent recognizes similar projects via semantic match and asks "this looks like X project — use that workflow as a starting point?"
+
+---
+
+### RavenTemplates — workflow marketplace
+
+Skills marketplaces sell tools. RavenTemplates sells proven workflows.
+
+The difference: a skill is a hammer. A template is a blueprint for building a fireplace — the sequence of steps, the tools needed at each step, the decision points, the merge conditions, the known failure modes, and the successful outcome already encoded in the chain structure.
+
+Templates are exported Raven chains — real causal sequences from completed projects, scrubbed of private data, packaged as reusable starting points.
+
+**What a template looks like:**
+```
+Template: "Weld a fireplace surround"
+  Steps: 14 nodes
+  Tools: angle_grinder, mig_welder, measuring_tape
+  Branch points: 2 (material choice, joint type)
+  Known failure modes: 3 (encoded as rollback markers)
+  Avg completion: 6 sessions
+  Success rate: 94% (community verified)
+```
+
+**How it works:**
+```
+User: "I need to build a steel fireplace surround"
+        ↓
+Agent: searches RavenTemplates
+        ↓
+Finds "Weld a fireplace surround" template
+        ↓
+Imports chain skeleton into user's DAG as speculative nodes
+        ↓
+Agent works through the template, confirming nodes as steps complete
+        ↓
+Deviations from template create new branches
+        ↓
+User can contribute their completed chain back as an improved template
+```
+
+**Template categories:**
+- Home fabrication (welding, woodworking, plumbing, electrical)
+- Software projects (API integration, ML training runs, deployments)
+- Research workflows (experiment sequences, literature reviews)
+- Business processes (client onboarding, compliance audits)
+- Creative projects (film production, game development, album recording)
+
+---
+
+### RGAT — graph attention over the causal chain
+
+Richer relationships and searchable context over everything ever done. RGAT learns over two edge types:
+
+- **Causal edges** — from the DAG (what caused what)
+- **Semantic edges** — from sqlite-vec (what's similar to what)
+
+Enables queries no retrieval system can answer: "what decision had the most downstream impact?", "which past session is most structurally similar to what we're doing now?", "what pattern of decisions tends to precede project failure?"
+
+---
+
+### More coming
+
+- Encryption at rest (SQLCipher + OS keychain)
+- Speculative planning (agent projects future nodes, reality confirms or prunes)
+- Payments via Marqeta virtual card with spending policy enforcement
+- Voice interface (Whisper + Piper TTS + wake word, hands-free for lab work)
+- Visual workspace awareness (Qwen3.5 vision at session start, agent sees the bench)
+- ROS2 bridge for robotics and home automation
+
+Ravens remember. So does your agent.
+
+---
+
+*Drop in. Stay local. Never forget.*
