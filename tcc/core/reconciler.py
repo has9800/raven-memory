@@ -1,9 +1,11 @@
 from __future__ import annotations
+
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from .dag import TaskDAG, _now
+from .dag import TaskDAG
 from .node import TCCNode
 
 
@@ -34,7 +36,6 @@ def _human_time(iso: str) -> str:
 
 
 class SessionReconciler:
-
     def start_session(
         self,
         dag: TaskDAG,
@@ -42,16 +43,6 @@ class SessionReconciler:
         search_query: str | None = None,
         n_search: int = 5,
     ) -> dict:
-        """
-        Start a new session and return context for agent injection.
-
-        Args:
-            dag: The TaskDAG to use
-            n_recent: Number of recent nodes to include
-            search_query: Optional semantic search query to find relevant
-                          historical nodes beyond the recent window
-            n_search: Number of semantic search results to include
-        """
         session_id = uuid.uuid4().hex[:12]
         tip = dag.tip()
         is_fresh = tip is None
@@ -66,6 +57,16 @@ class SessionReconciler:
                 search_query=search_query,
                 n_search=n_search,
             )
+
+        dag.append(
+            event="session start",
+            actor="system",
+            session_id=session_id,
+            node_type="milestone",
+            session_key=f"agent:raven:{session_id}",
+            subtype="start",
+            status="running",
+        )
 
         return {
             "session_id": session_id,
@@ -83,23 +84,24 @@ class SessionReconciler:
         n_search: int = 5,
     ) -> str:
         recent = dag.recent(n_recent)
-        lines = []
-        lines.append(f"Last active: {_human_time(tip.timestamp)}")
-        lines.append("")
-        lines.append("Recent events:")
+        lines = [f"Last active: {_human_time(tip.timestamp)}", "", "Recent events:"]
         for node in recent[:7]:
             lines.append(f"  [{node.actor}] {node.event} ({_human_time(node.timestamp)})")
-            if node.plan:
-                lines.append(f"    plan: {node.plan}")
+            if node.result_summary:
+                lines.append(f"    → {node.result_summary}")
+            elif node.summary:
+                lines.append(f"    → {node.summary}")
 
-        ctx = tip.context
-        if ctx.get("open_threads"):
-            lines.append("")
-            lines.append(f"Open threads: {', '.join(ctx['open_threads'])}")
-        if ctx.get("relevant_paths"):
-            lines.append(f"Relevant paths: {', '.join(ctx['relevant_paths'])}")
-        if ctx.get("notes"):
-            lines.append(f"Notes: {ctx['notes']}")
+        for node in recent:
+            if node.open_threads:
+                try:
+                    threads = json.loads(node.open_threads)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(threads, list) and threads:
+                    lines.append("")
+                    lines.append(f"Open threads: {', '.join(str(t) for t in threads)}")
+                    break
 
         semantic_nodes = []
         if search_query and dag._store.is_vec_enabled:
@@ -115,44 +117,78 @@ class SessionReconciler:
 
         return "\n".join(lines)
 
-    def end_session(self, dag: TaskDAG, session_id: str,
-                    notes: str = "") -> Optional[TCCNode]:
+    def end_session(self, dag: TaskDAG, session_id: str, notes: str = "") -> Optional[TCCNode]:
         session_nodes = dag.since(session_id)
         if not session_nodes:
             return None
         return dag.append(
-            event="session ended",
+            event="session end",
             actor="system",
-            plan="end of session",
-            context={"notes": notes, "session_id": session_id},
             session_id=session_id,
-            status="confirmed",
+            node_type="milestone",
+            session_key=f"agent:raven:{session_id}",
+            subtype="end",
+            summary=notes[:1000] if notes else None,
+            status="done",
         )
 
-    def record_event(self, dag: TaskDAG, session_id: str, event: str,
-                     actor: str, plan: str, context: dict,
-                     tool_call=None, status: str = "confirmed") -> TCCNode:
+    def record_event(
+        self,
+        dag: TaskDAG,
+        session_id: str,
+        event: str,
+        actor: str,
+        status: str = "done",
+        node_type: str | None = None,
+        session_key: str | None = None,
+        subtype: str | None = None,
+        result_summary: str | None = None,
+        tool_name: str | None = None,
+        transcript_ref: str | None = None,
+    ) -> TCCNode:
+        resolved_node_type = node_type or ("milestone" if actor == "system" else "action")
         if dag.tip() is None:
-            return dag.root(event, actor, plan, context, session_id, tool_call)
-        return dag.append(event, actor, plan, context, session_id,
-                          tool_call=tool_call, status=status)
-
-    def record_note(self, dag: TaskDAG, session_id: str, text: str,
-                    actor: str = "user") -> TCCNode:
-        return self.record_event(
-            dag, session_id, text, actor, plan="",
-            context={"type": "note"},
+            return dag.root(event, actor, session_id)
+        return dag.append(
+            event=event,
+            actor=actor,
+            session_id=session_id,
+            status=status,
+            node_type=resolved_node_type,
+            session_key=session_key or f"agent:raven:{session_id}",
+            subtype=subtype,
+            result_summary=result_summary,
+            tool_name=tool_name,
+            transcript_ref=transcript_ref,
         )
 
-    def record_tool_call(self, dag: TaskDAG, session_id: str,
-                         tool: str, params: dict, result: dict,
-                         status: str = "confirmed") -> TCCNode:
+    def record_note(self, dag: TaskDAG, session_id: str, note: str) -> TCCNode:
+        return dag.append(
+            event=note[:120],
+            actor="agent",
+            session_id=session_id,
+            node_type="decided",
+            session_key=f"agent:raven:{session_id}",
+            content=note[:500],
+            trigger="explicit",
+            status="done",
+        )
+
+    def record_tool_call(
+        self,
+        dag: TaskDAG,
+        session_id: str,
+        tool: str,
+        params: dict,
+        result: dict,
+        status: str = "done",
+    ) -> TCCNode:
         return self.record_event(
-            dag, session_id,
+            dag,
+            session_id,
             event=f"{tool} called",
             actor="tool",
-            plan="",
-            context={"tool": tool, "params": params, "result": result},
-            tool_call={"tool": tool, "params": params, "result": result},
             status=status,
+            tool_name=tool,
+            result_summary=str(result)[:200],
         )
