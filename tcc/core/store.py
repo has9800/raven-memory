@@ -182,22 +182,61 @@ class TCCStore:
                 cur.execute(f"ALTER TABLE nodes ADD COLUMN {col} {column_types[col]}")
 
     def save_node(self, node: TCCNode, parent_hashes: list[str]) -> None:
-        values = tuple(getattr(node, col) for col in NODE_COLUMNS)
         with self._lock:
             try:
-                self._conn.execute(
-                    f"INSERT INTO nodes ({', '.join(NODE_COLUMNS)}) VALUES ({', '.join(['?'] * len(NODE_COLUMNS))})",
-                    values,
-                )
-                if parent_hashes:
-                    self._conn.executemany(
-                        "INSERT OR IGNORE INTO node_parents(child_hash, parent_hash) VALUES (?, ?)",
-                        [(node.hash, parent_hash) for parent_hash in parent_hashes],
+                cur = self._conn.cursor()
+                self._write_node_no_commit(cur, node, parent_hashes)
+                # Set root_hash on first ever node
+                existing_root = self._conn.execute(
+                    "SELECT value FROM meta WHERE key='root_hash'"
+                ).fetchone()
+                if existing_root is None:
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO meta(key,value) VALUES(?,?)",
+                        ("root_hash", node.hash),
                     )
                 self._conn.commit()
             except sqlite3.IntegrityError:
                 self._conn.rollback()
                 raise DuplicateNodeError(f"Node {node.hash} already exists")
+
+    def _write_node_no_commit(
+        self,
+        cur: sqlite3.Cursor,
+        node: TCCNode,
+        parent_hashes: list[str],
+    ) -> None:
+        """Write node + parents without committing. Caller owns the transaction."""
+        values = tuple(getattr(node, col) for col in NODE_COLUMNS)
+        cur.execute(
+            f"INSERT OR IGNORE INTO nodes "
+            f"({', '.join(NODE_COLUMNS)}) "
+            f"VALUES ({', '.join(['?'] * len(NODE_COLUMNS))})",
+            values,
+        )
+        if parent_hashes:
+            cur.executemany(
+                "INSERT OR IGNORE INTO node_parents"
+                "(child_hash, parent_hash) VALUES (?, ?)",
+                [(node.hash, ph) for ph in parent_hashes],
+            )
+
+    def save_nodes_batch(self, items: list[tuple[TCCNode, list[str]]]) -> None:
+        """Write multiple nodes in a single transaction."""
+        with self._lock:
+            cur = self._conn.cursor()
+            for node, parent_hashes in items:
+                self._write_node_no_commit(cur, node, parent_hashes)
+            if items:
+                existing_root = self._conn.execute(
+                    "SELECT value FROM meta WHERE key='root_hash'"
+                ).fetchone()
+                if existing_root is None:
+                    self._conn.execute(
+                        "INSERT OR IGNORE INTO meta(key,value) VALUES(?,?)",
+                        ("root_hash", items[0][0].hash),
+                    )
+            self._conn.commit()
 
     def save(self, node: TCCNode) -> None:
         parent_hashes = list(getattr(node, "parent_hashes", ()))
