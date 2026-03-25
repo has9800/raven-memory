@@ -104,24 +104,24 @@ def main():
             }, id=3)
             assert result["is_fresh"] is True
             assert "session_id" in result
-            assert "context" in result
+            assert "summary" in result
             session_id = result["session_id"]
             print(f"[PASS] Session started: {session_id}")
-            print(f"  Context: {result['context'][:80]}...")
+            print(f"  Summary: {result['summary'][:80]}...")
 
             print("\n=== Test 4: Record events ===")
             r1 = call_tool(proc, "raven_record_event", {
                 "event": "started repulsor geometry simulation",
                 "actor": "agent",
-                "plan": "validate aerodynamic profile",
-                "context": {"sim": "aero_v3"},
+                "result_summary": "validate aerodynamic profile",
+                "tool_name": "run_simulation",
             }, id=4)
             assert r1["recorded"] is True
 
             r2 = call_tool(proc, "raven_record_event", {
                 "event": "user approved titanium housing switch",
                 "actor": "user",
-                "plan": "carbon fiber too brittle under load",
+                "result_summary": "carbon fiber too brittle under load",
             }, id=5)
             assert r2["recorded"] is True
             print("[PASS] 2 events recorded")
@@ -171,12 +171,12 @@ def main():
             }, id=2)
             assert ctx["is_fresh"] is False
             assert (
-                "repulsor" in ctx["context"].lower()
-                or "titanium" in ctx["context"].lower()
-                or "simulation" in ctx["context"].lower()
+                "repulsor" in ctx["summary"].lower()
+                or "titanium" in ctx["summary"].lower()
+                or "simulation" in ctx["summary"].lower()
             )
             print("[PASS] History survived restart")
-            print(f"  Context preview: {ctx['context'][:120]}...")
+            print(f"  Summary preview: {ctx['summary'][:120]}...")
 
             print("\n=== Test 8: Semantic search ===")
             if status["vec_enabled"]:
