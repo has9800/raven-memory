@@ -56,7 +56,7 @@ TOOLS = [
     {
         "name": "raven_start_session",
         "description": (
-            "Start a new Raven session and get project context. "
+            "Start a new Raven session and get project summary. "
             "Call this at the beginning of every conversation to load "
             "persistent memory. Returns a summary of recent events and "
             "semantically relevant history."
@@ -69,7 +69,7 @@ TOOLS = [
                     "description": (
                         "Optional: the user's first message or topic. "
                         "Used for semantic search over history to find "
-                        "relevant past context beyond recent nodes."
+                        "relevant past history beyond recent nodes."
                     ),
                 },
                 "n_recent": {
@@ -101,17 +101,16 @@ TOOLS = [
                     "enum": ["user", "agent", "tool", "system"],
                     "description": "Who or what caused this event.",
                 },
-                "plan": {
+                "result_summary": {
                     "type": "string",
-                    "description": "Why this happened / intent behind the action.",
+                    "description": "Optional: short summary of the result (max 200 chars).",
                 },
-                "context": {
-                    "type": "object",
-                    "description": "Optional freeform metadata (paths, notes, etc).",
-                    "default": {},
+                "tool_name": {
+                    "type": "string",
+                    "description": "Optional: name of the tool that was called.",
                 },
             },
-            "required": ["event", "actor", "plan"],
+            "required": ["event", "actor"],
         },
     },
     {
@@ -139,7 +138,7 @@ TOOLS = [
         "description": (
             "Semantic search over Raven's full history. Use this when "
             "the user asks about something that might be in past sessions "
-            "but isn't in the current context window. Returns the most "
+            "but isn't in the current prompt window. Returns the most "
             "relevant nodes by meaning, not just recency."
         ),
         "inputSchema": {
@@ -212,9 +211,9 @@ def handle_raven_start_session(params: dict) -> dict:
     return {
         "session_id": ctx["session_id"],
         "is_fresh": ctx["is_fresh"],
-        "context": ctx["summary"],
+        "summary": ctx["summary"],
         "message": (
-            "Session started. Inject the 'context' field into your "
+            "Session started. Inject the 'summary' field into your "
             "system prompt so the agent has project history."
         ),
     }
@@ -232,8 +231,9 @@ def handle_raven_record_event(params: dict) -> dict:
         session_id=_current_session_id,
         event=params["event"],
         actor=params["actor"],
-        plan=params["plan"],
-        context=params.get("context", {}),
+        status="done",
+        result_summary=params.get("result_summary"),
+        tool_name=params.get("tool_name"),
     )
 
     return {
@@ -286,8 +286,9 @@ def handle_raven_search(params: dict) -> dict:
                 "hash": node.hash,
                 "event": node.event,
                 "actor": node.actor,
-                "plan": node.plan,
                 "timestamp": node.timestamp,
+                "node_type": node.node_type,
+                "result_summary": node.result_summary,
             }
             for node in nodes
         ],
