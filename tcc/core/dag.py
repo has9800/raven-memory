@@ -124,6 +124,82 @@ class TaskDAG:
         self._store.set_branch_tip(branch_id, node.hash)
         return node, branch_id
 
+    def branch_from_tip(self, session_id: str) -> str:
+        """
+        Create a new branch forking from the current tip without
+        writing a node. Returns the new branch_id.
+        Use this when you want to start parallel work from the
+        current tip without recording an artificial fork event.
+        """
+        if not self._tip_hash:
+            raise DAGError("Cannot branch from empty DAG")
+        branch_id = uuid.uuid4().hex[:8]
+        while branch_id == "main" or branch_id in self._branches:
+            branch_id = uuid.uuid4().hex[:8]
+        self._branches[branch_id] = self._tip_hash
+        self._store.set_branch_tip(branch_id, self._tip_hash)
+        return branch_id
+
+    def merge(self, branch_hashes: list[str],
+              event: str = "merged parallel branches",
+              plan: str = "explicit merge",
+              session_id: str = "system") -> TCCNode:
+        """
+        Explicitly merge a list of branch tip hashes into the main chain.
+        Creates a merge node with all provided hashes as parents.
+        Returns the merge node.
+        """
+        # Validate all hashes exist
+        for h in branch_hashes:
+            if h not in self._index:
+                raise NodeNotFoundError(f"Branch tip {h} not found")
+
+        # Include current tip as a parent if not already in list
+        all_parents = list(dict.fromkeys(
+            ([self._tip_hash] if self._tip_hash else []) + branch_hashes
+        ))
+
+        # Build merged context from all branch tips
+        merged_context: dict = {
+            "open_threads": [],
+            "relevant_paths": [],
+            "notes": [],
+            "merged_branches": branch_hashes,
+        }
+        for h in branch_hashes:
+            node = self._index[h]
+            c = node.context
+            merged_context["open_threads"] += c.get("open_threads", [])
+            merged_context["relevant_paths"] += c.get("relevant_paths", [])
+            if c.get("notes"):
+                merged_context["notes"].append(c["notes"])
+        merged_context["open_threads"] = list(set(merged_context["open_threads"]))
+        merged_context["relevant_paths"] = list(set(merged_context["relevant_paths"]))
+
+        merge_node = TCCNode.create(
+            parent_hashes=tuple(all_parents),
+            timestamp=_now(),
+            event=event,
+            actor="system",
+            status="confirmed",
+            plan=plan,
+            tool_call=None,
+            context=merged_context,
+            session_id=session_id,
+            branch_id="main",
+        )
+        self._save_node(merge_node)
+        self._tip_hash = merge_node.hash
+        self._store.set_meta("tip_hash", merge_node.hash)
+
+        # Clear any branches whose tips are now merged
+        for bid in list(self._branches.keys()):
+            if self._branches[bid] in branch_hashes:
+                self._store.mark_branch_merged(bid)
+                del self._branches[bid]
+
+        return merge_node
+
     def update_status(self, hash: str, status: str) -> None:
         self._store.update_status(hash, status)
 
@@ -131,19 +207,10 @@ class TaskDAG:
         if not self._branches:
             return None
 
-        branch_tips = {bid: self._index.get(h) for bid, h in self._branches.items()}
-
-        # Find the common fork point — the pre-branch main tip
-        # All branches must share the same parent (the fork point)
-        parents_of_branches = set()
-        for tip_node in branch_tips.values():
-            if tip_node and tip_node.parent_hashes:
-                parents_of_branches.add(tip_node.parent_hashes[0])
-
-        if len(parents_of_branches) != 1:
-            return None
-
-        fork_hash = parents_of_branches.pop()
+        branch_tips = {
+            bid: self._index.get(h)
+            for bid, h in self._branches.items()
+        }
 
         # All branch tips must be confirmed or failed
         for tip_node in branch_tips.values():
@@ -154,10 +221,13 @@ class TaskDAG:
 
         # All branches ready — create merge node
         branch_tip_hashes = list(self._branches.values())
-        all_parents = tuple([fork_hash] + branch_tip_hashes)
 
-        # Merge context — union open_threads and relevant_paths
-        merged_context: dict = {"open_threads": [], "relevant_paths": [], "notes": []}
+        merged_context: dict = {
+            "open_threads": [],
+            "relevant_paths": [],
+            "notes": [],
+            "merged_branches": branch_tip_hashes,
+        }
         for tip_node in branch_tips.values():
             if tip_node:
                 c = tip_node.context
@@ -173,12 +243,19 @@ class TaskDAG:
 
         # Find session_id from one of the branch tips
         session_id = next(
-            (self._index[h].session_id for h in branch_tip_hashes if h in self._index),
+            (self._index[h].session_id
+             for h in branch_tip_hashes
+             if h in self._index),
             "system"
         )
 
+        # Include current main tip + all branch tips as parents
+        all_parents = list(dict.fromkeys(
+            ([self._tip_hash] if self._tip_hash else []) + branch_tip_hashes
+        ))
+
         merge_node = TCCNode.create(
-            parent_hashes=all_parents,
+            parent_hashes=tuple(all_parents),
             timestamp=_now(),
             event=merge_event,
             actor="system",
@@ -201,15 +278,33 @@ class TaskDAG:
         return merge_node
 
     def rollback(self, n: int = 1) -> TCCNode:
+        """
+        Roll the tip back n steps through parent_hashes[0].
+        Clears any branches whose tips are now ahead of the
+        rolled-back tip to prevent inconsistent state.
+        """
         if not self._tip_hash:
             raise DAGError("Empty DAG, cannot rollback")
         current = self._index[self._tip_hash]
         for i in range(n):
             if not current.parent_hashes:
-                raise DAGError(f"Cannot rollback {n} hops, only {i} available")
+                raise DAGError(
+                    f"Cannot rollback {n} hops, only {i} available"
+                )
             current = self._index[current.parent_hashes[0]]
         self._tip_hash = current.hash
         self._store.set_meta("tip_hash", current.hash)
+
+        # Clear branches whose tips are ahead of the new tip
+        # (i.e. not ancestors of the new tip)
+        stale = []
+        for bid, tip_hash in self._branches.items():
+            if not self.is_ancestor_of_tip(tip_hash):
+                stale.append(bid)
+        for bid in stale:
+            self._store.mark_branch_merged(bid)
+            del self._branches[bid]
+
         return current
 
     def tip(self) -> Optional[TCCNode]:
@@ -226,12 +321,21 @@ class TaskDAG:
         if not self._tip_hash:
             return []
         result = []
-        current = self._index.get(self._tip_hash)
-        while current and len(result) < n:
+        seen = set()
+        # Use a list as a queue, sorted by timestamp descending
+        frontier = [self._index[self._tip_hash]] if self._tip_hash in self._index else []
+        while frontier and len(result) < n:
+            # Pick the most recent node from frontier
+            frontier.sort(key=lambda node: node.timestamp, reverse=True)
+            current = frontier.pop(0)
+            if current.hash in seen:
+                continue
+            seen.add(current.hash)
             result.append(current)
-            if not current.parent_hashes:
-                break
-            current = self._index.get(current.parent_hashes[0])
+            # Add all parents to frontier
+            for ph in current.parent_hashes:
+                if ph in self._index and ph not in seen:
+                    frontier.append(self._index[ph])
         return result
 
     def since(self, session_id: str) -> list[TCCNode]:
