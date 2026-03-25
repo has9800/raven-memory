@@ -63,6 +63,12 @@ class TCCStore:
         self._lock = threading.Lock()
         self._on_status_update = on_status_update
         self._conn = sqlite3.connect(path, check_same_thread=False)
+        if path != ":memory:":
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA synchronous=NORMAL")
+            self._conn.execute("PRAGMA cache_size=-64000")
+            self._conn.execute("PRAGMA temp_store=MEMORY")
+            self._conn.commit()
         self._vec_enabled = self._load_sqlite_vec(self._conn)
         self._init_schema()
 
