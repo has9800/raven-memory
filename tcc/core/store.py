@@ -1,20 +1,60 @@
 from __future__ import annotations
+
 import json
 import sqlite3
 import threading
 import warnings
+from collections import deque
 from typing import Callable, Optional
 
 from .node import TCCNode
 
-VALID_STATUSES = {"confirmed", "failed", "speculative", "pruned", "running"}
+VALID_STATUSES = {"running", "done", "failed"}
 
 
-class TCCError(Exception): pass
-class NodeNotFoundError(TCCError): pass
-class DuplicateNodeError(TCCError): pass
-class DAGError(TCCError): pass
-class InvalidStatusError(TCCError): pass
+class TCCError(Exception):
+    pass
+
+
+class NodeNotFoundError(TCCError):
+    pass
+
+
+class DuplicateNodeError(TCCError):
+    pass
+
+
+class DAGError(TCCError):
+    pass
+
+
+class InvalidStatusError(TCCError):
+    pass
+
+
+NODE_COLUMNS = [
+    "hash",
+    "node_type",
+    "timestamp",
+    "actor",
+    "session_key",
+    "session_id",
+    "event",
+    "status",
+    "branch_id",
+    "transcript_ref",
+    "tool_name",
+    "tool_args_hash",
+    "duration_ms",
+    "result_summary",
+    "file_path",
+    "content",
+    "trigger",
+    "subtype",
+    "summary",
+    "open_threads",
+    "token_count",
+]
 
 
 class TCCStore:
@@ -47,20 +87,44 @@ class TCCStore:
     def _init_schema(self):
         with self._lock:
             cur = self._conn.cursor()
-            cur.executescript("""
+            cur.executescript(
+                """
                 CREATE TABLE IF NOT EXISTS nodes (
                     hash            TEXT PRIMARY KEY,
-                    parent_hashes   TEXT NOT NULL,
+                    node_type       TEXT NOT NULL,
                     timestamp       TEXT NOT NULL,
-                    event           TEXT NOT NULL,
                     actor           TEXT NOT NULL,
-                    status          TEXT NOT NULL,
-                    plan            TEXT NOT NULL,
-                    tool_call       TEXT,
-                    context         TEXT NOT NULL,
+                    session_key     TEXT NOT NULL,
                     session_id      TEXT NOT NULL,
+                    event           TEXT NOT NULL,
+                    status          TEXT NOT NULL,
                     branch_id       TEXT NOT NULL DEFAULT 'main',
-                    metadata        TEXT NOT NULL DEFAULT '{}'
+                    transcript_ref  TEXT,
+                    tool_name       TEXT,
+                    tool_args_hash  TEXT,
+                    duration_ms     INTEGER,
+                    result_summary  TEXT,
+                    file_path       TEXT,
+                    content         TEXT,
+                    trigger         TEXT,
+                    subtype         TEXT,
+                    summary         TEXT,
+                    open_threads    TEXT,
+                    token_count     INTEGER
+                );
+                CREATE TABLE IF NOT EXISTS node_parents (
+                    child_hash  TEXT NOT NULL,
+                    parent_hash TEXT NOT NULL,
+                    PRIMARY KEY (child_hash, parent_hash)
+                );
+                CREATE INDEX IF NOT EXISTS idx_node_parents_child
+                    ON node_parents(child_hash);
+                CREATE INDEX IF NOT EXISTS idx_node_parents_parent
+                    ON node_parents(parent_hash);
+                CREATE TABLE IF NOT EXISTS tool_payloads (
+                    args_hash   TEXT PRIMARY KEY,
+                    args_json   TEXT NOT NULL,
+                    output_json TEXT
                 );
                 CREATE TABLE IF NOT EXISTS meta (
                     key   TEXT PRIMARY KEY,
@@ -70,58 +134,213 @@ class TCCStore:
                 CREATE INDEX IF NOT EXISTS idx_branch    ON nodes(branch_id);
                 CREATE INDEX IF NOT EXISTS idx_status    ON nodes(status);
                 CREATE INDEX IF NOT EXISTS idx_timestamp ON nodes(timestamp);
-            """)
+            """
+            )
+            self._migrate_nodes_schema(cur)
             if self._vec_enabled:
-                cur.executescript("""
+                cur.executescript(
+                    """
                     CREATE VIRTUAL TABLE IF NOT EXISTS node_embeddings
                     USING vec0(
                         hash        TEXT PRIMARY KEY,
                         embedding   FLOAT[384]
                     );
-                """)
+                """
+                )
             self._conn.commit()
 
-    def save(self, node: TCCNode) -> None:
+    def _migrate_nodes_schema(self, cur: sqlite3.Cursor) -> None:
+        info_rows = cur.execute("PRAGMA table_info(nodes)").fetchall()
+        if not info_rows:
+            return
+        existing_columns = {row[1] for row in info_rows}
+        column_types = {
+            "node_type": "TEXT",
+            "session_key": "TEXT",
+            "transcript_ref": "TEXT",
+            "tool_name": "TEXT",
+            "tool_args_hash": "TEXT",
+            "duration_ms": "INTEGER",
+            "result_summary": "TEXT",
+            "file_path": "TEXT",
+            "content": "TEXT",
+            "trigger": "TEXT",
+            "subtype": "TEXT",
+            "summary": "TEXT",
+            "open_threads": "TEXT",
+            "token_count": "INTEGER",
+            "branch_id": "TEXT",
+            "event": "TEXT",
+            "status": "TEXT",
+            "session_id": "TEXT",
+            "timestamp": "TEXT",
+            "actor": "TEXT",
+            "hash": "TEXT",
+        }
+        for col in NODE_COLUMNS:
+            if col not in existing_columns:
+                cur.execute(f"ALTER TABLE nodes ADD COLUMN {col} {column_types[col]}")
+
+    def save_node(self, node: TCCNode, parent_hashes: list[str]) -> None:
+        values = tuple(getattr(node, col) for col in NODE_COLUMNS)
         with self._lock:
             try:
                 self._conn.execute(
-                    "INSERT INTO nodes VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (
-                        node.hash,
-                        json.dumps(list(node.parent_hashes)),
-                        node.timestamp,
-                        node.event,
-                        node.actor,
-                        node.status,
-                        node.plan,
-                        json.dumps(node.tool_call) if node.tool_call else None,
-                        json.dumps(node.context),
-                        node.session_id,
-                        node.branch_id,
-                        json.dumps(node.metadata),
-                    ),
+                    f"INSERT INTO nodes ({', '.join(NODE_COLUMNS)}) VALUES ({', '.join(['?'] * len(NODE_COLUMNS))})",
+                    values,
                 )
+                if parent_hashes:
+                    self._conn.executemany(
+                        "INSERT OR IGNORE INTO node_parents(child_hash, parent_hash) VALUES (?, ?)",
+                        [(node.hash, parent_hash) for parent_hash in parent_hashes],
+                    )
                 self._conn.commit()
             except sqlite3.IntegrityError:
+                self._conn.rollback()
                 raise DuplicateNodeError(f"Node {node.hash} already exists")
+
+    def save(self, node: TCCNode) -> None:
+        parent_hashes = list(getattr(node, "parent_hashes", ()))
+        self.save_node(node, parent_hashes=parent_hashes)
+
+    def save_tool_payload(self, args_hash: str, args_json: str, output_json: str | None) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR IGNORE INTO tool_payloads(args_hash, args_json, output_json) VALUES (?, ?, ?)",
+                (args_hash, args_json, output_json),
+            )
+            self._conn.commit()
+
+    def get_tool_payload(self, args_hash: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT args_json, output_json FROM tool_payloads WHERE args_hash=?",
+                (args_hash,),
+            ).fetchone()
+        if not row:
+            return None
+        return {"args": row[0], "output": row[1]}
+
+    def get_parents(self, hash: str) -> list[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT parent_hash FROM node_parents WHERE child_hash=?",
+                (hash,),
+            ).fetchall()
+        return [row[0] for row in rows]
+
+    def get_children(self, hash: str) -> list[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT child_hash FROM node_parents WHERE parent_hash=?",
+                (hash,),
+            ).fetchall()
+        return [row[0] for row in rows]
+
+    def ancestors(self, hash: str, max_depth: int = 50) -> list[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                WITH RECURSIVE anc(hash, depth) AS (
+                    SELECT parent_hash, 1
+                    FROM node_parents
+                    WHERE child_hash = ?
+                    UNION ALL
+                    SELECT np.parent_hash, anc.depth + 1
+                    FROM node_parents np
+                    JOIN anc ON np.child_hash = anc.hash
+                    WHERE anc.depth < ?
+                )
+                SELECT hash, MIN(depth) AS d
+                FROM anc
+                GROUP BY hash
+                ORDER BY d ASC;
+                """,
+                (hash, max_depth),
+            ).fetchall()
+        return [row[0] for row in rows]
+
+    def descendants(self, hash: str, max_depth: int = 50) -> list[str]:
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                WITH RECURSIVE des(hash, depth) AS (
+                    SELECT child_hash, 1
+                    FROM node_parents
+                    WHERE parent_hash = ?
+                    UNION ALL
+                    SELECT np.child_hash, des.depth + 1
+                    FROM node_parents np
+                    JOIN des ON np.parent_hash = des.hash
+                    WHERE des.depth < ?
+                )
+                SELECT hash, MIN(depth) AS d
+                FROM des
+                GROUP BY hash
+                ORDER BY d ASC;
+                """,
+                (hash, max_depth),
+            ).fetchall()
+        return [row[0] for row in rows]
+
+    def path_between(self, from_hash: str, to_hash: str) -> list[str]:
+        if from_hash == to_hash:
+            return [from_hash]
+        queue: deque[str] = deque([from_hash])
+        prev: dict[str, str | None] = {from_hash: None}
+
+        while queue:
+            current = queue.popleft()
+            for child in self.get_children(current):
+                if child in prev:
+                    continue
+                prev[child] = current
+                if child == to_hash:
+                    path = [to_hash]
+                    node = to_hash
+                    while prev[node] is not None:
+                        node = prev[node]  # type: ignore[index]
+                        path.append(node)
+                    return list(reversed(path))
+                queue.append(child)
+        return []
+
+    def get_node(self, hash: str) -> TCCNode:
+        return self.load(hash)
+
+    def load(self, hash: str) -> TCCNode:
+        with self._lock:
+            row = self._conn.execute(
+                f"SELECT {', '.join(NODE_COLUMNS)} FROM nodes WHERE hash=?",
+                (hash,),
+            ).fetchone()
+        if not row:
+            raise NodeNotFoundError(f"Node {hash} not found")
+        return self._row_to_node(row)
+
+    def get_all_nodes(self) -> list[TCCNode]:
+        return self.load_all()
+
+    def load_all(self) -> list[TCCNode]:
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT {', '.join(NODE_COLUMNS)} FROM nodes ORDER BY timestamp ASC"
+            ).fetchall()
+        return [self._row_to_node(r) for r in rows]
+
+    def nodes_for_session(self, session_id: str) -> list[TCCNode]:
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT {', '.join(NODE_COLUMNS)} FROM nodes WHERE session_id=? ORDER BY timestamp ASC",
+                (session_id,),
+            ).fetchall()
+        return [self._row_to_node(row) for row in rows]
 
     def embed_all(
         self,
         show_progress: bool = False,
         batch_size: int = 32,
     ) -> int:
-        """
-        Batch embed all nodes that don't yet have embeddings.
-        Uses batched encoding for 10-20x speedup over one-at-a-time.
-        Call once after bulk ingestion rather than embedding on every save().
-
-        Args:
-            show_progress: show tqdm progress bar during encoding
-            batch_size: number of texts to encode per forward pass (default 32)
-
-        Returns:
-            number of nodes embedded
-        """
         if not self._vec_enabled:
             return 0
 
@@ -129,15 +348,9 @@ class TCCStore:
             from .embedder import get_embedder
 
             with self._lock:
-                all_hashes = {
-                    r[0] for r in self._conn.execute(
-                        "SELECT hash FROM nodes"
-                    ).fetchall()
-                }
+                all_hashes = {r[0] for r in self._conn.execute("SELECT hash FROM nodes").fetchall()}
                 embedded_hashes = {
-                    r[0] for r in self._conn.execute(
-                        "SELECT hash FROM node_embeddings"
-                    ).fetchall()
+                    r[0] for r in self._conn.execute("SELECT hash FROM node_embeddings").fetchall()
                 }
 
             to_embed = list(all_hashes - embedded_hashes)
@@ -145,10 +358,7 @@ class TCCStore:
                 return 0
 
             nodes = [self.load(h) for h in to_embed]
-            texts = [
-                f"{n.event}. {n.plan}".strip(". ")
-                for n in nodes
-            ]
+            texts = [n.event for n in nodes]
 
             model = get_embedder()
             all_vecs = model.encode(
@@ -161,8 +371,7 @@ class TCCStore:
             with self._lock:
                 for node, vec in zip(nodes, all_vecs):
                     self._conn.execute(
-                        "INSERT OR REPLACE INTO node_embeddings"
-                        "(hash, embedding) VALUES (?, ?)",
+                        "INSERT OR REPLACE INTO node_embeddings(hash, embedding) VALUES (?, ?)",
                         (node.hash, json.dumps(vec.tolist())),
                     )
                 self._conn.commit()
@@ -172,22 +381,6 @@ class TCCStore:
         except Exception as exc:
             warnings.warn(f"embed_all failed: {exc}", UserWarning)
             return 0
-
-    def load(self, hash: str) -> TCCNode:
-        with self._lock:
-            row = self._conn.execute(
-                "SELECT * FROM nodes WHERE hash=?", (hash,)
-            ).fetchone()
-        if not row:
-            raise NodeNotFoundError(f"Node {hash} not found")
-        return self._row_to_node(row)
-
-    def load_all(self) -> list[TCCNode]:
-        with self._lock:
-            rows = self._conn.execute(
-                "SELECT * FROM nodes ORDER BY timestamp ASC"
-            ).fetchall()
-        return [self._row_to_node(r) for r in rows]
 
     def update_status(self, hash: str, status: str) -> None:
         if status not in VALID_STATUSES:
@@ -205,31 +398,33 @@ class TCCStore:
     def query_before(self, timestamp: str) -> list[TCCNode]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM nodes WHERE timestamp < ? ORDER BY timestamp ASC",
+                f"SELECT {', '.join(NODE_COLUMNS)} FROM nodes WHERE timestamp < ? ORDER BY timestamp ASC",
                 (timestamp,),
             ).fetchall()
         return [self._row_to_node(r) for r in rows]
 
     def delete(self, hashes: list[str]) -> None:
         with self._lock:
-            self._conn.executemany(
-                "DELETE FROM nodes WHERE hash=?", [(h,) for h in hashes]
-            )
+            self._conn.executemany("DELETE FROM nodes WHERE hash=?", [(h,) for h in hashes])
+            self._conn.executemany("DELETE FROM node_parents WHERE child_hash=?", [(h,) for h in hashes])
+            self._conn.executemany("DELETE FROM node_parents WHERE parent_hash=?", [(h,) for h in hashes])
             self._conn.commit()
 
     def get_meta(self, key: str) -> Optional[str]:
         with self._lock:
-            row = self._conn.execute(
-                "SELECT value FROM meta WHERE key=?", (key,)
-            ).fetchone()
+            row = self._conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
         return row[0] if row else None
 
     def set_meta(self, key: str, value: str) -> None:
         with self._lock:
-            self._conn.execute(
-                "INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)", (key, value)
-            )
+            self._conn.execute("INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)", (key, value))
             self._conn.commit()
+
+    def get_tip_hash(self) -> Optional[str]:
+        return self.get_meta("tip_hash")
+
+    def set_tip_hash(self, hash: str) -> None:
+        self.set_meta("tip_hash", hash)
 
     def get_branch_tip(self, branch_id: str) -> Optional[str]:
         return self.get_meta(f"branch_{branch_id}_tip")
@@ -244,7 +439,7 @@ class TCCStore:
             ).fetchall()
         result = {}
         for key, value in rows:
-            branch_id = key[len("branch_"):-len("_tip")]
+            branch_id = key[len("branch_") : -len("_tip")]
             if branch_id == "main":
                 continue
             merged = self.get_meta(f"branch_{branch_id}_merged")
@@ -261,16 +456,6 @@ class TCCStore:
         n: int = 5,
         session_id: str | None = None,
     ) -> list[TCCNode]:
-        """
-        Semantic search over node embeddings.
-        Returns up to n nodes most similar to the query string.
-        Falls back to empty list if sqlite-vec not available.
-
-        Args:
-            query: Natural language search query
-            n: Number of results to return
-            session_id: Optional filter to search within a specific session
-        """
         if not self._vec_enabled:
             return []
 
@@ -316,15 +501,24 @@ class TCCStore:
     def _row_to_node(self, row) -> TCCNode:
         return TCCNode(
             hash=row[0],
-            parent_hashes=tuple(json.loads(row[1])),
+            node_type=row[1],
             timestamp=row[2],
-            event=row[3],
-            actor=row[4],
-            status=row[5],
-            plan=row[6],
-            tool_call=json.loads(row[7]) if row[7] else None,
-            context=json.loads(row[8]),
-            session_id=row[9],
-            branch_id=row[10],
-            metadata=json.loads(row[11]),
+            actor=row[3],
+            session_key=row[4],
+            session_id=row[5],
+            event=row[6],
+            status=row[7],
+            branch_id=row[8],
+            transcript_ref=row[9],
+            tool_name=row[10],
+            tool_args_hash=row[11],
+            duration_ms=row[12],
+            result_summary=row[13],
+            file_path=row[14],
+            content=row[15],
+            trigger=row[16],
+            subtype=row[17],
+            summary=row[18],
+            open_threads=row[19],
+            token_count=row[20],
         )
