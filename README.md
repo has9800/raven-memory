@@ -119,12 +119,12 @@ benchmark designed specifically for causal agent memory systems.
 **Requirements:** Python 3.10+, sqlite-vec (optional, enables semantic search)
 
 ```bash
-pip install tcc-agentic
+pip install raven-memory
 ```
 
 **Optional — semantic search:**
 ```bash
-pip install sqlite-vec
+pip install raven-memory['vec']
 ```
 
 ---
