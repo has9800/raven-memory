@@ -1,10 +1,10 @@
 ---
 name: raven-memory
-version: 1.0.0
+version: 1.0.1
 description: >
   Persistent causal memory for AI agents. Raven records everything
-  your agent does as a causally-linked chain — decisions, tool calls,
-  parallel work, session history. Your agent finally remembers.
+  your agent does as a causally-linked chain, including decisions, tool calls,
+  parallel work, and session history. Your agent finally remembers.
 category: memory
 exclusive: true
 author: hahmed9800
