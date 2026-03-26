@@ -15,8 +15,8 @@ requirements:
   packages:
     - tcc-agentic
 mcp:
-  command: python3
-  args: ["-m", "tcc.integration.mcp_server"]
+  command: raven-mcp
+  args: []
   env:
     RAVEN_DB_PATH: "${HOME}/.raven/raven.db"
     RAVEN_N_RECENT: "10"
@@ -47,9 +47,14 @@ survives across sessions, days, and weeks.
 
 ## Setup
 
-Install Python dependencies:
+Install from PyPI:
 ```bash
-pip install tcc-agentic
+pip install raven-memory
+```
+
+With semantic search (recommended):
+```bash
+pip install "raven-memory[vec]"
 ```
 
 Then install this skill:
