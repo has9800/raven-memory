@@ -8,4 +8,3 @@ sqlite-vec
 sentence-transformers
 
 datasets
-openai
