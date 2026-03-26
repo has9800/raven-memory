@@ -13,7 +13,7 @@ tags: [memory, persistence, causal, local, privacy]
 requirements:
   python: ">=3.10"
   packages:
-    - tcc-agentic
+    - raven-memory
 mcp:
   command: raven-mcp
   args: []
