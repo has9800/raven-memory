@@ -65,7 +65,6 @@ clawhub install raven-memory
 Add to your OpenClaw system prompt:
 ```
 At the start of every conversation, call raven_start_session with
-the user's first message as search_query. Inject the returned
-context into your awareness. Record significant events with
-raven_record_event. End sessions with raven_end_session.
+the user's first message as search_query. Load the returned
+summary/nodes into your context before responding. Record events with raven_record_event. End sessions with raven_end_session.
 ```
