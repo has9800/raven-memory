@@ -89,6 +89,28 @@ Raven exposes six tools over the MCP protocol:
 
 ---
 
+## CausalMemBench
+
+Raven scores 100% on CausalMemBench — a benchmark specifically 
+designed to test causal agent memory across six categories that 
+existing benchmarks do not cover.
+
+| Category | Score |
+|---|---|
+| Causal provenance | 5/5 |
+| Parallel execution | 5/5 |
+| Temporal ordering | 5/5 |
+| Rollback provenance | 5/5 |
+| Cross-session continuity | 5/5 |
+| Merge outcomes | 5/5 |
+| **Total** | **30/30 = 100%** |
+
+CausalMemBench tests questions that require understanding *why* 
+something happened, not just *what* happened. It is the first 
+benchmark designed specifically for causal agent memory systems.
+
+---
+
 ## Installation
 
 **Requirements:** Python 3.10+, sqlite-vec (optional, enables semantic search)
