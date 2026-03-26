@@ -1,4 +1,7 @@
-![Raven memory logo](./raven.png)
+<p align="center">
+  <img src="./raven_logo.png" 
+       alt="Raven Memory" width="100%"/>
+</p>
 
 
 # Raven
